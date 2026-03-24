@@ -3,7 +3,7 @@
  * Plugin Name: OA Assistant
  * Plugin URI:  https://github.com/odear/oa-assistant
  * Description: AI Assistant toolkit for WordPress - REST API for Elementor page management
- * Version:     1.1.0
+ * Version:     1.2.3
  * Author:      Olivier de Armenteras
  * License:     MIT
  * Text Domain: oa-assistant
@@ -13,7 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'OA_VERSION',     '1.1.0' );
+define( 'OA_VERSION',     '1.2.3' );
 define( 'OA_OPTION_KEY',  'oa_api_key' );
 define( 'OA_NAMESPACE',   'oa/v1' );
 
@@ -94,6 +94,49 @@ function oa_register_routes() {
                 'validate_callback' => function( $v ) { return is_numeric( $v ) && $v > 0; },
                 'sanitize_callback' => 'absint',
             ),
+        ),
+    ) );
+
+    // GET /oa/v1/menus
+    register_rest_route( OA_NAMESPACE, '/menus', array(
+        'methods'             => WP_REST_Server::READABLE,
+        'callback'            => 'oa_endpoint_menus',
+        'permission_callback' => 'oa_check_key',
+    ) );
+
+    // POST /oa/v1/menu-item
+    register_rest_route( OA_NAMESPACE, '/menu-item', array(
+        'methods'             => WP_REST_Server::CREATABLE,
+        'callback'            => 'oa_endpoint_menu_item',
+        'permission_callback' => 'oa_check_key',
+        'args'                => array(
+            'menu_id'    => array( 'required' => true,  'sanitize_callback' => 'absint' ),
+            'title'      => array( 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ),
+            'url'        => array( 'required' => true,  'sanitize_callback' => 'esc_url_raw' ),
+            'menu_order' => array( 'required' => false, 'sanitize_callback' => 'absint', 'default' => 0 ),
+        ),
+    ) );
+
+    // POST /oa/v1/header-nav-item
+    register_rest_route( OA_NAMESPACE, '/header-nav-item', array(
+        'methods'             => WP_REST_Server::CREATABLE,
+        'callback'            => 'oa_endpoint_header_nav_item',
+        'permission_callback' => 'oa_check_key',
+        'args'                => array(
+            'title'     => array( 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ),
+            'url'       => array( 'required' => true,  'sanitize_callback' => 'esc_url_raw' ),
+            'header_id' => array( 'required' => false, 'sanitize_callback' => 'absint' ),
+        ),
+    ) );
+
+    // DELETE /oa/v1/header-nav-item
+    register_rest_route( OA_NAMESPACE, '/header-nav-item', array(
+        'methods'             => WP_REST_Server::DELETABLE,
+        'callback'            => 'oa_endpoint_delete_header_nav_item',
+        'permission_callback' => 'oa_check_key',
+        'args'                => array(
+            'url'       => array( 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ),
+            'header_id' => array( 'required' => false, 'sanitize_callback' => 'absint' ),
         ),
     ) );
 }
@@ -286,6 +329,325 @@ function oa_endpoint_elementor_flush( WP_REST_Request $request ) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+//  Endpoint: GET /oa/v1/menus
+// ──────────────────────────────────────────────────────────────────────────────
+
+function oa_endpoint_menus( WP_REST_Request $request ) {
+    $menus = wp_get_nav_menus();
+    $result = array();
+    foreach ( $menus as $menu ) {
+        $result[] = array(
+            'id'    => $menu->term_id,
+            'name'  => $menu->name,
+            'slug'  => $menu->slug,
+            'count' => $menu->count,
+        );
+    }
+    return rest_ensure_response( $result );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Endpoint: POST /oa/v1/menu-item
+// ──────────────────────────────────────────────────────────────────────────────
+
+function oa_endpoint_menu_item( WP_REST_Request $request ) {
+    $menu_id    = $request->get_param( 'menu_id' );
+    $title      = $request->get_param( 'title' );
+    $url        = $request->get_param( 'url' );
+    $menu_order = $request->get_param( 'menu_order' ) ?: 0;
+
+    // Verify menu exists
+    $menu = wp_get_nav_menu_object( $menu_id );
+    if ( ! $menu ) {
+        return new WP_Error( 'oa_not_found', "Menu {$menu_id} not found.", array( 'status' => 404 ) );
+    }
+
+    // Check if an item with this URL already exists in this menu
+    $existing_items = wp_get_nav_menu_items( $menu_id );
+    if ( is_array( $existing_items ) ) {
+        foreach ( $existing_items as $item ) {
+            if ( $item->url === $url ) {
+                return rest_ensure_response( array(
+                    'ok'      => true,
+                    'item_id' => $item->ID,
+                    'note'    => 'Item already exists',
+                ) );
+            }
+        }
+    }
+
+    $item_id = wp_update_nav_menu_item( $menu_id, 0, array(
+        'menu-item-title'   => $title,
+        'menu-item-url'     => $url,
+        'menu-item-status'  => 'publish',
+        'menu-item-type'    => 'custom',
+        'menu-item-position' => $menu_order,
+    ) );
+
+    if ( is_wp_error( $item_id ) ) {
+        return new WP_Error( 'oa_menu_error', $item_id->get_error_message(), array( 'status' => 500 ) );
+    }
+
+    return rest_ensure_response( array(
+        'ok'      => true,
+        'item_id' => $item_id,
+        'menu_id' => $menu_id,
+        'title'   => $title,
+        'url'     => $url,
+    ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Endpoint: POST /oa/v1/header-nav-item
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Recursively walk Elementor widget tree and return a reference to the first
+ * text-editor widget whose 'editor' content contains a <nav tag.
+ */
+function &oa_find_nav_widget( array &$elements ) {
+    $null = null;
+    foreach ( $elements as &$element ) {
+        if (
+            isset( $element['widgetType'] ) &&
+            $element['widgetType'] === 'text-editor' &&
+            isset( $element['settings']['editor'] ) &&
+            stripos( $element['settings']['editor'], '<nav' ) !== false
+        ) {
+            return $element;
+        }
+        if ( ! empty( $element['elements'] ) && is_array( $element['elements'] ) ) {
+            $found = &oa_find_nav_widget( $element['elements'] );
+            if ( $found !== null ) {
+                return $found;
+            }
+        }
+    }
+    return $null;
+}
+
+/**
+ * Resolve the header post ID: use header_id param if provided, otherwise
+ * auto-detect via Elementor HF (header template with ehf_template_type=header).
+ * Returns int post ID or WP_Error.
+ */
+function oa_resolve_header_post_id( WP_REST_Request $request ) {
+    $override = $request->get_param( 'header_id' );
+    if ( ! empty( $override ) ) {
+        if ( ! get_post( $override ) ) {
+            return new WP_Error( 'oa_not_found', "Post {$override} not found.", array( 'status' => 404 ) );
+        }
+        return (int) $override;
+    }
+
+    // Auto-detect: Elementor Header & Footer (post_type elementor-hf, meta ehf_template_type=header)
+    $posts = get_posts( array(
+        'post_type'      => 'elementor-hf',
+        'post_status'    => array( 'publish', 'draft', 'private' ),
+        'posts_per_page' => 1,
+        'meta_query'     => array(
+            array(
+                'key'     => 'ehf_template_type',
+                'value'   => 'header',
+                'compare' => '=',
+            ),
+        ),
+    ) );
+
+    if ( ! empty( $posts ) ) {
+        return (int) $posts[0]->ID;
+    }
+
+    // Fallback: any elementor-hf post whose title contains "header" (case-insensitive)
+    $all_hf = get_posts( array(
+        'post_type'      => 'elementor-hf',
+        'post_status'    => array( 'publish', 'draft', 'private' ),
+        'posts_per_page' => -1,
+    ) );
+    foreach ( $all_hf as $p ) {
+        if ( stripos( $p->post_title, 'header' ) !== false ) {
+            return (int) $p->ID;
+        }
+    }
+
+    return new WP_Error(
+        'oa_no_header',
+        'Could not auto-detect header template. Pass header_id explicitly.',
+        array( 'status' => 404 )
+    );
+}
+
+function oa_endpoint_header_nav_item( WP_REST_Request $request ) {
+    $title = $request->get_param( 'title' );
+    $url   = $request->get_param( 'url' );
+
+    // Resolve header post ID
+    $header_post_id = oa_resolve_header_post_id( $request );
+    if ( is_wp_error( $header_post_id ) ) {
+        return $header_post_id;
+    }
+
+    // Load Elementor data
+    $raw = get_post_meta( $header_post_id, '_elementor_data', true );
+    if ( empty( $raw ) || $raw === '[]' ) {
+        return new WP_Error(
+            'oa_no_data',
+            "No Elementor data found for post {$header_post_id}.",
+            array( 'status' => 404 )
+        );
+    }
+
+    $data = json_decode( $raw, true );
+    if ( json_last_error() !== JSON_ERROR_NONE || ! is_array( $data ) ) {
+        return new WP_Error(
+            'oa_parse_error',
+            "Could not parse Elementor data for post {$header_post_id}.",
+            array( 'status' => 500 )
+        );
+    }
+
+    // Find the text-editor widget containing a <nav>
+    $widget = &oa_find_nav_widget( $data );
+    if ( $widget === null ) {
+        return new WP_Error(
+            'oa_not_found',
+            "No text-editor widget with <nav> found in post {$header_post_id}.",
+            array( 'status' => 404 )
+        );
+    }
+
+    // Build the new <a> tag
+    $style   = 'color: rgba(255,255,255,0.75); text-decoration: none; font-size: 14px; font-family: inherit;';
+    $new_tag = '<a href="' . esc_url( $url ) . '" style="' . esc_attr( $style ) . '">' . esc_html( $title ) . '</a>';
+
+    // Insert before </nav>
+    $editor_html = $widget['settings']['editor'];
+    if ( stripos( $editor_html, '</nav>' ) === false ) {
+        return new WP_Error(
+            'oa_no_nav_close',
+            'Closing </nav> tag not found in widget content.',
+            array( 'status' => 422 )
+        );
+    }
+
+    $widget['settings']['editor'] = str_ireplace( '</nav>', $new_tag . '</nav>', $editor_html );
+
+    // Save back
+    $encoded = wp_json_encode( $data );
+    if ( $encoded === false ) {
+        return new WP_Error( 'oa_encode_error', 'Could not re-encode Elementor data.', array( 'status' => 500 ) );
+    }
+
+    update_post_meta( $header_post_id, '_elementor_data', wp_slash( $encoded ) );
+    update_post_meta( $header_post_id, '_elementor_edit_mode', 'builder' );
+
+    // Flush Elementor cache
+    if ( defined( 'ELEMENTOR_VERSION' ) ) {
+        Elementor\Plugin::$instance->files_manager->clear_cache();
+    }
+
+    // Purge page caches
+    do_action( 'litespeed_purge_post', $header_post_id );
+    if ( function_exists( 'rocket_clean_post' ) ) {
+        rocket_clean_post( $header_post_id );
+    }
+
+    return rest_ensure_response( array(
+        'ok'      => true,
+        'post_id' => $header_post_id,
+        'title'   => $title,
+        'url'     => $url,
+    ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+//  Endpoint: DELETE /oa/v1/header-nav-item
+// ──────────────────────────────────────────────────────────────────────────────
+
+function oa_endpoint_delete_header_nav_item( WP_REST_Request $request ) {
+    $url = $request->get_param( 'url' );
+
+    // Resolve header post ID
+    $header_post_id = oa_resolve_header_post_id( $request );
+    if ( is_wp_error( $header_post_id ) ) {
+        return $header_post_id;
+    }
+
+    // Load Elementor data
+    $raw = get_post_meta( $header_post_id, '_elementor_data', true );
+    if ( empty( $raw ) || $raw === '[]' ) {
+        return new WP_Error(
+            'oa_no_data',
+            "No Elementor data found for post {$header_post_id}.",
+            array( 'status' => 404 )
+        );
+    }
+
+    $data = json_decode( $raw, true );
+    if ( json_last_error() !== JSON_ERROR_NONE || ! is_array( $data ) ) {
+        return new WP_Error(
+            'oa_parse_error',
+            "Could not parse Elementor data for post {$header_post_id}.",
+            array( 'status' => 500 )
+        );
+    }
+
+    // Find the text-editor widget containing a <nav>
+    $widget = &oa_find_nav_widget( $data );
+    if ( $widget === null ) {
+        return new WP_Error(
+            'oa_not_found',
+            "No text-editor widget with <nav> found in post {$header_post_id}.",
+            array( 'status' => 404 )
+        );
+    }
+
+    $editor_html = $widget['settings']['editor'];
+
+    // Remove any <a> tag whose href contains the given url.
+    // Matches both single and double quoted href attributes.
+    $escaped_url  = preg_quote( $url, '/' );
+    $pattern      = '/<a\s[^>]*href=["\'][^"\']*' . $escaped_url . '[^"\']*["\'][^>]*>.*?<\/a>/is';
+    $new_html     = preg_replace( $pattern, '', $editor_html );
+
+    if ( $new_html === $editor_html ) {
+        return new WP_Error(
+            'oa_not_found',
+            "No <a> tag with href matching '{$url}' found in nav widget.",
+            array( 'status' => 404 )
+        );
+    }
+
+    $widget['settings']['editor'] = $new_html;
+
+    // Save back
+    $encoded = wp_json_encode( $data );
+    if ( $encoded === false ) {
+        return new WP_Error( 'oa_encode_error', 'Could not re-encode Elementor data.', array( 'status' => 500 ) );
+    }
+
+    update_post_meta( $header_post_id, '_elementor_data', wp_slash( $encoded ) );
+    update_post_meta( $header_post_id, '_elementor_edit_mode', 'builder' );
+
+    // Flush Elementor cache
+    if ( defined( 'ELEMENTOR_VERSION' ) ) {
+        Elementor\Plugin::$instance->files_manager->clear_cache();
+    }
+
+    // Purge page caches
+    do_action( 'litespeed_purge_post', $header_post_id );
+    if ( function_exists( 'rocket_clean_post' ) ) {
+        rocket_clean_post( $header_post_id );
+    }
+
+    return rest_ensure_response( array(
+        'ok'      => true,
+        'post_id' => $header_post_id,
+        'removed' => $url,
+    ) );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 //  Admin settings page – set / regenerate API key
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -360,6 +722,10 @@ function oa_admin_page() {
                 <tr><td>GET/POST</td><td><code><?php echo esc_html( $site_url ); ?>/wp-json/oa/v1/progress</code></td><td>Read or write progress JSON</td></tr>
                 <tr><td>POST</td><td><code><?php echo esc_html( $site_url ); ?>/wp-json/oa/v1/elementor-write</code></td><td>Write Elementor page data</td></tr>
                 <tr><td>POST</td><td><code><?php echo esc_html( $site_url ); ?>/wp-json/oa/v1/elementor-flush</code></td><td>Flush Elementor + cache</td></tr>
+                <tr><td>GET</td><td><code><?php echo esc_html( $site_url ); ?>/wp-json/oa/v1/menus</code></td><td>List all navigation menus</td></tr>
+                <tr><td>POST</td><td><code><?php echo esc_html( $site_url ); ?>/wp-json/oa/v1/menu-item</code></td><td>Add item to navigation menu</td></tr>
+                <tr><td>POST</td><td><code><?php echo esc_html( $site_url ); ?>/wp-json/oa/v1/header-nav-item</code></td><td>Add &lt;a&gt; item to header nav</td></tr>
+                <tr><td>DELETE</td><td><code><?php echo esc_html( $site_url ); ?>/wp-json/oa/v1/header-nav-item</code></td><td>Remove &lt;a&gt; item from header nav by url</td></tr>
             </tbody>
         </table>
     </div>
